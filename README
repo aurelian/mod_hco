@@ -1,0 +1,11 @@
+
+LoadModule hco_module modules/mod_hco.so
+
+<Location /hco>
+  HcoEngine On
+  HcoEndPoint "http://end-point"
+  HcoAuthKey "hello-world"
+
+</Location>
+
+
