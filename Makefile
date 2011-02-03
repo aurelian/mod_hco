@@ -33,7 +33,7 @@ clean:
 
 #   simple test
 test: reload
-	lynx -mime_header http://localhost:8199/hco
+	lynx -mime_header http://localhost:8199/hco/index.html?app_id=myappid&app_key=myappkey
 
 #   install and activate shared object by reloading Apache to
 #   force a reload of the shared object file
