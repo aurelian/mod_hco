@@ -1,1 +1,7 @@
-*.swp
+.*.swp
+.libs
+.*so
+*.la
+*.lo
+*.o
+*.slo
