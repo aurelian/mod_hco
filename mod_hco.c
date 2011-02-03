@@ -27,7 +27,6 @@
 #include "apr.h"
 #include "apr_version.h"
 #include "apr_strings.h"
-// #include "apr_hooks.h"
 
 #include "ap_config.h"
 #include "httpd.h"
@@ -37,13 +36,6 @@
 #include "http_log.h"
 #include "http_protocol.h"
 #include "http_vhost.h"
-
-// orig.
-// #include "httpd.h"
-// #include "http_config.h"
-// #include "http_protocol.h"
-// #include "http_log.h"
-// #include "ap_config.h"
 
 #include <curl/curl.h>
 #include <time.h>
@@ -61,8 +53,8 @@ typedef struct {
   
 } hco_server_conf;
 
-/**
- * @return A newly created table with corresponding name=value keys.
+/*
+ * return a table with app_id and app_key value keys.
  */
 static apr_table_t *
 parse_query_string(request_rec * r, const char * query)
@@ -192,6 +184,9 @@ static int hco_handler(request_rec *r) {
 
     if(CURLE_OK == res) {
 
+#if 1
+      // XXX. replace with debug
+      // this modifies the response
       curl_easy_getinfo(sconf->curl, CURLINFO_CONTENT_TYPE, &remote_content_type);
       curl_easy_getinfo(sconf->curl, CURLINFO_EFFECTIVE_URL, &remote_eff_url);
       curl_easy_getinfo(sconf->curl, CURLINFO_TOTAL_TIME, &remote_total_time);
@@ -203,8 +198,7 @@ static int hco_handler(request_rec *r) {
       ap_rprintf(r, " --effective end-point url: %s\n", remote_eff_url);
       ap_rprintf(r, " --took: %f sec.\n", remote_total_time);
       ap_rprintf(r, " --response code: %d\n", remote_response_code);
-#if 1
-      // XXX. replace with debug.
+      
       if(chunk.memory) {
         ap_rprintf(r, "\n --remote body-- \n%s\n", chunk.memory);
         ap_rprintf(r, "\n --remote size: %lu\n", (long)chunk.size);
@@ -339,8 +333,6 @@ static int hco_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, s
 static int hco_fixups(request_rec *r)
 {
     hco_server_conf *sconf = (hco_server_conf *)ap_get_module_config(r->server->module_config, &hco_module);
-
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: fixups.");
 
     if(sconf->enabled == HCO_DISABLED) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: module not enabled.");
