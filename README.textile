@@ -1,4 +1,4 @@
-<code>
+bc..
 
 LoadModule hco_module modules/mod_hco.so
 
