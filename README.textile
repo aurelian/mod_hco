@@ -1,4 +1,4 @@
-bc..
+<pre>
 
 LoadModule hco_module modules/mod_hco.so
 
@@ -10,4 +10,4 @@ LoadModule hco_module modules/mod_hco.so
 
 </Directory>
 
-</code>
+</pre>
