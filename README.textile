@@ -3,11 +3,19 @@
 LoadModule hco_module modules/mod_hco.so
 
 <Directory />
-  HcoEngine On
+  HcoEngine On|Off (default: Off)
   HcoBasePath "/path"
   HcoEndPoint "http://end-point"
   HcoAuthKey "hello-world"
 
+  HcoAuthStrategy allow|pass|deny (default: deny)
 </Directory>
 
 </pre>
+
+HcoAuthStrategy:
+
+ * allow -> skip authorisation (hits the app code)
+ * pass  -> perform authorization and add X-HcoAuthResponse header (hits the app code)
+ * deny  -> perform authorization and forward the upstream response in case of failure (won't hit app code)
+
