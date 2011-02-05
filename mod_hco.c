@@ -47,12 +47,18 @@
 module AP_MODULE_DECLARE_DATA hco_module;
 
 typedef struct {
+    // resources
     CURL *curl;
+    // configurations
     const char *base_path;
     const char *end_point;
     const char *auth_key;
     int enabled;
 } hco_server_conf;
+
+typedef struct {
+    const char *app_id;
+} hco_req_conf;
 
 /*
  * return a table with app_id and app_key value keys.
@@ -120,15 +126,24 @@ static int hco_handler(request_rec *r) {
     const char *app_key;
     apr_table_t *params;
 
-    hco_server_conf * sconf = hco_get_server_conf(r->server);
+    hco_req_conf *rconf;
+    hco_server_conf * sconf;
 
     if(strcmp(r->handler, "hco-handler")) {
         return DECLINED;
     }
 
+    // parse query args and extract app_id and maybe app_key
     params = parse_query_string(r->pool, r->parsed_uri.query);
     app_id = apr_table_get(params, "app_id");
     app_key= apr_table_get(params, "app_key");
+
+    // save app_id for later use in the hook chain
+    rconf = apr_palloc(r->pool, sizeof(hco_req_conf));
+    ap_set_module_config(r->request_config, &hco_module, rconf);
+    rconf->app_id = app_id;
+
+    sconf= hco_get_server_conf(r->server);
 
 #if 0
 // this will fail to authenticate later on. what to do?
@@ -144,7 +159,7 @@ static int hco_handler(request_rec *r) {
     }
 #endif
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> ready to authorize.");
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> ready.");
 
     authpath = apr_pstrcat(
         r->pool,
@@ -174,18 +189,18 @@ static int hco_handler(request_rec *r) {
     int remote_response_code;
     CURLcode res;
 
-    res = curl_easy_perform( sconf->curl );
+    res = curl_easy_perform(sconf->curl);
 
     if(CURLE_OK == res) {
 
 #if 1
       // XXX. replace with debug
-      // this modifies the response
       curl_easy_getinfo(sconf->curl, CURLINFO_CONTENT_TYPE, &remote_content_type);
       curl_easy_getinfo(sconf->curl, CURLINFO_EFFECTIVE_URL, &remote_eff_url);
       curl_easy_getinfo(sconf->curl, CURLINFO_TOTAL_TIME, &remote_total_time);
       curl_easy_getinfo(sconf->curl, CURLINFO_RESPONSE_CODE, &remote_response_code);
 
+      // this modifies the response
       r->content_type = "text/plain";
       ap_rputs("output from mod_hco.c\n", r);
       ap_rprintf(r, " --content type: %s\n", remote_content_type);
@@ -368,38 +383,34 @@ static int hco_fixups(request_rec *r)
  * Reports the transaction.
  */
 static int
-hco_log_transaction(request_rec *orig)
+hco_log_transaction(request_rec *r)
 {
     const char *report_path;
     const char *post_data;
-    const char *app_id;
-    apr_table_t *params;
     CURLcode res;
 
-    hco_server_conf *sconf = hco_get_server_conf(orig->server);
+    hco_req_conf *rconf = ap_get_module_config(r->request_config, &hco_module);
+    hco_server_conf *sconf = hco_get_server_conf(r->server);
 
-    if(!sconf->enabled || strstr(orig->uri, sconf->base_path) == NULL) {
+    if(!sconf->enabled || strstr(r->uri, sconf->base_path) == NULL) {
         return OK;
     }
 
-    params = parse_query_string(orig->pool, orig->parsed_uri.query);
-    app_id = apr_table_get(params, "app_id");
-
-    if(app_id == NULL) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, orig->server, "HCO: log-> skip report missing app_id arg.");
+    if(rconf->app_id == NULL) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> skip report missing app_id arg.");
         return OK;
     }
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, orig->server, "HCO: log-> sending report.");
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> sending report.");
 
-    report_path= apr_pstrcat(orig->pool, sconf->end_point, "/transactions.xml", NULL);
+    report_path= apr_pstrcat(r->pool, sconf->end_point, "/transactions.xml", NULL);
 
     post_data= apr_pstrcat(
-        orig->pool,
+        r->pool,
         "provider_key=",
         sconf->auth_key,
         "&transactions[0][app_id]=",
-        app_id,
+        rconf->app_id,
         "&transactions[0][usage][hits]=1",
         NULL
     );
@@ -422,30 +433,34 @@ hco_log_transaction(request_rec *orig)
 #if 1
 // XXX. replace with debug.
       if(chunk.memory) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, orig->server, "HCO: log-> transaction response: < %s >.", chunk.memory );
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> transaction response: < %s >.", chunk.memory );
         free(chunk.memory);
       }
 #endif
     } else {
-      ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, orig->server, "HCO: log-> failed: < %s >.", curl_easy_strerror(res));
+      ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> failed: < %s >.", curl_easy_strerror(res));
     }
     return OK;
 }
 
 static const command_rec hco_cmds[] =
 {
-  AP_INIT_FLAG("HcoEngine", cmd_hco_engine,  NULL, ACCESS_CONF, "On or Off to enable or disable (default) the whole hco engine"),
-  AP_INIT_TAKE1("HcoBasePath", cmd_hco_base_path, NULL, ACCESS_CONF, "base path"),
-  AP_INIT_TAKE1("HcoEndPoint", cmd_hco_end_point, NULL, ACCESS_CONF, "end point URL"),
-  AP_INIT_TAKE1("HcoAuthKey", cmd_hco_auth_key, NULL, ACCESS_CONF, "provider key"),
-  { NULL }
+    AP_INIT_FLAG("HcoEngine", cmd_hco_engine,  NULL, ACCESS_CONF,
+        "On or Off to enable or disable (default) the whole hco engine"),
+    AP_INIT_TAKE1("HcoBasePath", cmd_hco_base_path, NULL, ACCESS_CONF,
+        "base path"),
+    AP_INIT_TAKE1("HcoEndPoint", cmd_hco_end_point, NULL, ACCESS_CONF,
+        "end point URL"),
+    AP_INIT_TAKE1("HcoAuthKey", cmd_hco_auth_key, NULL, ACCESS_CONF,
+        "provider key"),
+    { NULL }
 };
 
 static void hco_register_hooks(apr_pool_t *p)
 {
-    ap_hook_handler(hco_handler, NULL, NULL, APR_HOOK_MIDDLE); // generic handler --XXX. replace by auth
-    ap_hook_fixups(hco_fixups, NULL, NULL, APR_HOOK_MIDDLE) ;  // decides if the hco-handler should run for this request --XXX. replace by auth
-    ap_hook_post_config(hco_post_config, NULL, NULL, APR_HOOK_MIDDLE); // creates cURL handlers within server pool --XXX. create 1 handler/ server
+    ap_hook_handler(hco_handler, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_fixups(hco_fixups, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_post_config(hco_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_log_transaction(hco_log_transaction, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
