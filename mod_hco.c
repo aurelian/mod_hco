@@ -282,7 +282,7 @@ hco_log_transaction(request_rec *r)
     }
 
     if(rconf->app_id == NULL) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> skip report missing app_id arg.");
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> skip report, missing app_id arg.");
         return OK;
     }
 
@@ -415,69 +415,79 @@ static void *hco_server_config_create(apr_pool_t *p, server_rec *s)
     return sconf;
 }
 
-static int hco_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
+static int hco_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *main_server)
 {
 
-    int turn_off = 0;
-    hco_server_conf *sconf = hco_get_server_conf(s);
+    int turn_off;
+    hco_server_conf *main_conf;
+    hco_server_conf *sconf;
+    server_rec *s;
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config.", s->server_hostname);
+    main_conf= hco_get_server_conf(main_server);
 
-    if(!sconf->enabled) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config: disabled.", s->server_hostname);
-        return OK;
-    }
+    for (s = main_server; s; s = s->next) {
 
-    if(sconf->base_path == NULL) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoBasePath config value.");
-        turn_off = 1;
-    }
+        sconf= hco_get_server_conf(s);
+        turn_off= 0;
 
-    if(sconf->end_point == NULL) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoEndPoint config value.");
-        turn_off = 1;
-    }
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config.", s->server_hostname);
+        if(!sconf->enabled) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config: disabled.", s->server_hostname);
+            continue;
+        }
 
-    if(sconf->auth_key == NULL) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoAuthKey config value.");
-        turn_off = 1;
-    }
+        if(sconf->base_path == NULL) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoBasePath config value.");
+            turn_off = 1;
+        }
 
-    if(turn_off) {
-        sconf->enabled= HCO_DISABLED;
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turning off.");
-    }
+        if(sconf->end_point == NULL) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoEndPoint config value.");
+            turn_off = 1;
+        }
 
-    curl_global_init(CURL_GLOBAL_ALL);
-    sconf->curl = curl_easy_init();
+        if(sconf->auth_key == NULL) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoAuthKey config value.");
+            turn_off = 1;
+        }
 
-    if(sconf->curl) {
-        // let's setup global curl options here.
-        curl_easy_setopt(sconf->curl, CURLOPT_URL, sconf->end_point);
-        // setup our user agent
-        char *user_agent = apr_pstrcat(s->process->pool,
-                "hco-agent/0.1 (+httpd: <",
-                ap_get_server_description(),
-                "> +apr: <",
-                APR_VERSION_STRING,
-                "> +libcURL: <",
-                curl_version(),
-                ">) build: ",
-                __DATE__,
-                "-",
-                __TIME__,
-#if APR_HAS_THREADS
-                " (threaded)",
+        if(turn_off) {
+            sconf->enabled= HCO_DISABLED;
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turning off.");
+        }
+
+        // XXX. child init.
+        curl_global_init(CURL_GLOBAL_ALL);
+        sconf->curl = curl_easy_init();
+
+        if(sconf->curl) {
+            // let's setup global curl options here.
+            curl_easy_setopt(sconf->curl, CURLOPT_URL, sconf->end_point);
+            // setup our user agent
+            char *user_agent = apr_pstrcat(s->process->pool,
+                    "hco-agent/0.1 (+httpd: <",
+                    ap_get_server_description(),
+                    "> +apr: <",
+                    APR_VERSION_STRING,
+                    "> +libcURL: <",
+                    curl_version(),
+                    ">) build: ",
+                    __DATE__,
+                    "-",
+                    __TIME__,
+#ifdef APR_HAS_THREADS
+                    " (threaded)",
 #endif
-                NULL
-            );
-        curl_easy_setopt(sconf->curl, CURLOPT_USERAGENT, user_agent);
-        curl_easy_setopt(sconf->curl, CURLOPT_HEADER, 1);
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO: %s.", user_agent);
-    } else {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: failed to create cURL handler.");
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turrning off.");
-        sconf->enabled = HCO_DISABLED;
+                    NULL
+                );
+            curl_easy_setopt(sconf->curl, CURLOPT_USERAGENT, user_agent);
+            curl_easy_setopt(sconf->curl, CURLOPT_HEADER, 1);
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO: %s.", user_agent);
+        } else {
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: failed to create cURL handler.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turrning off.");
+            sconf->enabled = HCO_DISABLED;
+        }
     }
 
     return OK;
