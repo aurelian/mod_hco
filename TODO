@@ -1,4 +1,7 @@
 0.1 
- * fix handcoded paths in Makefile
  * make it work on POST
+ * make it work under Location directive and remove HcoBasePath
+
+1.0
+ * fix handcoded paths in Makefile
 
