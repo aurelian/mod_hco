@@ -160,11 +160,11 @@ static void pass_strategy(CURL *curl, request_rec *r)
     int remote_code;
     CURLcode res;
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: pass strategy.");
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: pass strategy.", r->server->server_hostname);
 
     res = curl_easy_perform(curl);
     if(CURLE_OK != res) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: remote-> < %s >.", curl_easy_strerror(res));
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: remote-> < %s >.", r->server->server_hostname, curl_easy_strerror(res));
         apr_table_set(r->headers_out, "X-HcoAuthResponse", "-1");
         return;
     }
@@ -189,26 +189,28 @@ static int deny_strategy(CURL *curl, request_rec *r)
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, hco_remote_write_data);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: deny strategy.");
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: deny strategy.", r->server->server_hostname);
 
     res = curl_easy_perform(curl);
 
     if(CURLE_OK != res) {
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "HCO: remote-> < %s >.", curl_easy_strerror(res));
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "HCO[%s]: remote-> < %s >.", r->server->server_hostname, curl_easy_strerror(res));
         return OK;
     }
 
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &remote_code);
     if(remote_code == 200) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> done.");
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: handler-> done.", r->server->server_hostname);
         return DECLINED;
     }
 
     curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &remote_content_type);
-    r->content_type= remote_content_type;
 
+    r->content_type= remote_content_type;
     ap_rputs(chunk.memory, r);
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> forward %d- %s.", remote_code, remote_content_type);
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server,
+        "HCO[%s]: handler-> forward %d- %s.", r->server->server_hostname, remote_code, remote_content_type);
 
     return OK; // remote_code;
 }
@@ -251,7 +253,7 @@ static int hco_handler(request_rec *r) {
         NULL
     );
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> ready: <%s>.", authpath);
+    // ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> ready: <%s>.", authpath);
 
     curl_easy_setopt(sconf->curl, CURLOPT_URL, authpath);
 
@@ -350,7 +352,8 @@ static const char *cmd_hco_engine(cmd_parms *cmd, void *dconf, int flag)
 /*
  * Config: HcoBasePath "/path"
  */
-static const char *cmd_hco_base_path(cmd_parms *cmd, void *dconf, const char *a1) {
+static const char *cmd_hco_base_path(cmd_parms *cmd, void *dconf, const char *a1)
+{
     hco_server_conf *sconf = hco_get_server_conf(cmd->server);
 
     sconf->base_path = a1;
@@ -405,8 +408,6 @@ static void *hco_server_config_create(apr_pool_t *p, server_rec *s)
 {
     hco_server_conf *sconf = (hco_server_conf *)apr_palloc(p, sizeof(hco_server_conf));
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- server config.", s->server_hostname);
-
     sconf->enabled   = HCO_DISABLED;
     sconf->end_point = NULL;
     sconf->auth_key  = NULL;
@@ -415,48 +416,60 @@ static void *hco_server_config_create(apr_pool_t *p, server_rec *s)
     return sconf;
 }
 
+/*
+ * Post Configuration, validates server config
+ */
 static int hco_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *main_server)
 {
 
     int turn_off;
-    hco_server_conf *main_conf;
     hco_server_conf *sconf;
     server_rec *s;
-
-    main_conf= hco_get_server_conf(main_server);
 
     for (s = main_server; s; s = s->next) {
 
         sconf= hco_get_server_conf(s);
         turn_off= 0;
 
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config.", s->server_hostname);
         if(!sconf->enabled) {
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config: disabled.", s->server_hostname);
             continue;
         }
 
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s] -- post config.", s->server_hostname);
         if(sconf->base_path == NULL) {
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoBasePath config value.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: missing HcoBasePath config value.", s->server_hostname);
             turn_off = 1;
         }
 
         if(sconf->end_point == NULL) {
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoEndPoint config value.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: missing HcoEndPoint config value.", s->server_hostname);
             turn_off = 1;
         }
 
         if(sconf->auth_key == NULL) {
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: missing HcoAuthKey config value.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: missing HcoAuthKey config value.", s->server_hostname);
             turn_off = 1;
         }
 
         if(turn_off) {
             sconf->enabled= HCO_DISABLED;
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turning off.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s] -- turning off.", s->server_hostname);
+        }
+    }
+    return OK;
+}
+
+static void hco_child_init(apr_pool_t *p, server_rec *main_server)
+{
+    hco_server_conf *sconf;
+    server_rec *s;
+
+    for (s = main_server; s; s = s->next) {
+        sconf= hco_get_server_conf(s);
+        if(!sconf->enabled) {
+            continue;
         }
 
-        // XXX. child init.
         curl_global_init(CURL_GLOBAL_ALL);
         sconf->curl = curl_easy_init();
 
@@ -482,16 +495,13 @@ static int hco_post_config(apr_pool_t *p, apr_pool_t *plog, apr_pool_t *ptemp, s
                 );
             curl_easy_setopt(sconf->curl, CURLOPT_USERAGENT, user_agent);
             curl_easy_setopt(sconf->curl, CURLOPT_HEADER, 1);
-            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO: %s.", user_agent);
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s]: user agent-> %s.", s->server_hostname, user_agent);
         } else {
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: failed to create cURL handler.");
-            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO: turrning off.");
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: failed to create cURL handler.", s->server_hostname);
+            ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: turrning off.", s->server_hostname);
             sconf->enabled = HCO_DISABLED;
         }
     }
-
-    return OK;
-
 }
 
 static const command_rec hco_cmds[] =
@@ -512,6 +522,7 @@ static const command_rec hco_cmds[] =
 static void hco_register_hooks(apr_pool_t *p)
 {
     ap_hook_post_config(hco_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_child_init(hco_child_init, NULL, NULL, APR_HOOK_MIDDLE);
 
     ap_hook_fixups(hco_fixups, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler(hco_handler, NULL, NULL, APR_HOOK_MIDDLE);
