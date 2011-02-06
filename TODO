@@ -1,5 +1,4 @@
 0.1 
- * replace hco_handler with ap_hook_access_checker (or similar)
- * replace cURL resource from server_config struct (it's so wrong) with apr_reslist (http://www.apachetutor.org/dev/reslist#d6)
  * fix handcoded paths in Makefile
+ * make it work on POST
 
