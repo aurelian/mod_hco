@@ -14,11 +14,12 @@
 
 /*
 **  mod_hco.c -- Apache sample hco module
+**
 **  To play with this sample module first compile it into a
 **  DSO file and install it into Apache's modules directory
 **  by running:
 **
-**    $ apxs -c -i mod_hco.c
+**    $ apxs -c -lcurl -i mod_hco.c
 **
 */
 
@@ -35,6 +36,7 @@
 #include "http_log.h"
 #include "http_protocol.h"
 #include "http_vhost.h"
+#include "util_filter.h"
 
 #include <curl/curl.h>
 #include <time.h>
@@ -45,6 +47,8 @@
 #define hco_get_server_conf(srv) (hco_server_conf *)ap_get_module_config(srv->module_config, &hco_module)
 
 module AP_MODULE_DECLARE_DATA hco_module;
+
+static ap_filter_rec_t *hco_deny_filter_handle;
 
 enum strategy {
   HCO_STRATEGY_ALLOW,
@@ -63,8 +67,12 @@ typedef struct {
     int enabled;
 } hco_server_conf;
 
+// structure passed with request_rec
 typedef struct {
     const char *app_id;
+    int         remote_response_code;
+    const char *remote_response_body;
+    const char *remote_response_content_type;
 } hco_req_conf;
 
 /* _______________________________________
@@ -139,7 +147,10 @@ static size_t hco_remote_write_data(void *buffer, size_t size, size_t nmemb, voi
  */
 static int hco_fixups(request_rec *r)
 {
-    hco_server_conf *sconf = hco_get_server_conf(r->server);
+    hco_server_conf *sconf;
+    hco_req_conf *rconf;
+
+    sconf = hco_get_server_conf(r->server);
 
     if(!sconf->enabled
         || strstr(r->uri, sconf->base_path) == NULL
@@ -148,39 +159,51 @@ static int hco_fixups(request_rec *r)
         return OK;
     }
 
+    rconf = apr_palloc(r->pool, sizeof(hco_req_conf));
+    ap_set_module_config(r->request_config, &hco_module, rconf);
+
     r->handler = "hco-handler";
     return OK;
 }
 
 /*
- * this makes the auth request and adds a header
+ * Output filter called by deny strategy.
+ * This is where the respose code / body are replaced with upstream
  */
-static void pass_strategy(CURL *curl, request_rec *r)
+static int hco_deny_filter(ap_filter_t *f, apr_bucket_brigade *in)
 {
-    int remote_code;
-    CURLcode res;
+    apr_bucket *e;
+    request_rec *r = f->r;
+    hco_req_conf *rconf = ap_get_module_config(r->request_config, &hco_module);
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: pass strategy.", r->server->server_hostname);
+    // content type and response code
+    r->content_type = rconf->remote_response_content_type;
+    r->status = rconf->remote_response_code;
 
-    res = curl_easy_perform(curl);
-    if(CURLE_OK != res) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: remote-> < %s >.", r->server->server_hostname, curl_easy_strerror(res));
-        apr_table_set(r->headers_out, "X-HcoAuthResponse", "-1");
-        return;
-    }
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &remote_code);
-    apr_table_set(r->headers_out, "X-HcoAuthResponse", apr_itoa(r->pool, remote_code));
-    return;
+    // response body
+    e = apr_bucket_pool_create(rconf->remote_response_body, strlen(rconf->remote_response_body), r->pool, in->bucket_alloc);
+    APR_BRIGADE_INSERT_HEAD(in, e);
+    e = apr_bucket_eos_create(in->bucket_alloc);
+    APR_BRIGADE_INSERT_TAIL(in, e);
+    ap_remove_output_filter(f);
+
+    // ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server,
+    //     "HCO[%s]: handler-> forward %d- %s: <%s>.", r->server->server_hostname, rconf->remote_response_code,
+    //     rconf->remote_response_content_type, rconf->remote_response_body);
+
+    return ap_pass_brigade(f->next, in);
 }
 
 /*
- * this makes the auth request and forwards the upstream response in case of failure
+ * This makes the auth request and forwards the upstream response in case of failure
  */
 static int deny_strategy(CURL *curl, request_rec *r)
 {
     int remote_code;
-    char *remote_content_type;
+    const char *remote_content_type;
     struct RemoteMemoryStruct chunk;
+
+    hco_req_conf *rconf;
     CURLcode res;
 
     chunk.memory= malloc(1);
@@ -199,6 +222,7 @@ static int deny_strategy(CURL *curl, request_rec *r)
     }
 
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &remote_code);
+
     if(remote_code == 200) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: handler-> done.", r->server->server_hostname);
         return DECLINED;
@@ -206,15 +230,39 @@ static int deny_strategy(CURL *curl, request_rec *r)
 
     curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &remote_content_type);
 
-    r->content_type= remote_content_type;
-    ap_rputs(chunk.memory, r);
+    rconf= ap_get_module_config(r->request_config, &hco_module);
+    rconf->remote_response_content_type= remote_content_type;
+    rconf->remote_response_code = remote_code;
+    rconf->remote_response_body = chunk.memory;
 
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server,
-        "HCO[%s]: handler-> forward %d- %s.", r->server->server_hostname, remote_code, remote_content_type);
+    free(chunk.memory);
 
-    return OK; // remote_code;
+    ap_add_output_filter_handle(hco_deny_filter_handle, NULL, r, r->connection);
+
+    return OK;
 }
 
+/*
+ * This makes the auth request and adds X-HcoAuthResponse header with the upstream response code
+ */
+static void pass_strategy(CURL *curl, request_rec *r)
+{
+    int remote_code;
+    CURLcode res;
+
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: pass strategy.", r->server->server_hostname);
+
+    res = curl_easy_perform(curl);
+    if(CURLE_OK != res) {
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: remote-> < %s >.", r->server->server_hostname, curl_easy_strerror(res));
+        apr_table_set(r->headers_out, "X-HcoAuthResponse", "-1");
+        return;
+    }
+
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &remote_code);
+    apr_table_set(r->headers_out, "X-HcoAuthResponse", apr_itoa(r->pool, remote_code));
+    return;
+}
 
 /*
  * The hco content handler
@@ -238,8 +286,7 @@ static int hco_handler(request_rec *r) {
     app_key= apr_table_get(params, "app_key");
 
     // save app_id for later use in the hook chain
-    rconf = apr_palloc(r->pool, sizeof(hco_req_conf));
-    ap_set_module_config(r->request_config, &hco_module, rconf);
+    rconf= ap_get_module_config(r->request_config, &hco_module);
     rconf->app_id = app_id;
 
     sconf= hco_get_server_conf(r->server);
@@ -253,7 +300,7 @@ static int hco_handler(request_rec *r) {
         NULL
     );
 
-    // ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: handler-> ready: <%s>.", authpath);
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO[%s]: handler-> ready: <%s>.", r->server->server_hostname, authpath);
 
     curl_easy_setopt(sconf->curl, CURLOPT_URL, authpath);
 
@@ -261,7 +308,8 @@ static int hco_handler(request_rec *r) {
         pass_strategy(sconf->curl, r);
         return DECLINED;
     } else if(sconf->auth_strategy == HCO_STRATEGY_DENY) {
-        return deny_strategy(sconf->curl, r);
+        int code= deny_strategy(sconf->curl, r);
+        return code;
     }
     return DECLINED;
 }
@@ -274,16 +322,28 @@ hco_log_transaction(request_rec *r)
 {
     const char *report_path;
     const char *post_data;
+    const char *app_id;
+    int remote_code;
     CURLcode res;
+    hco_req_conf *rconf;
+    hco_server_conf *sconf;
 
-    hco_req_conf *rconf = ap_get_module_config(r->request_config, &hco_module);
-    hco_server_conf *sconf = hco_get_server_conf(r->server);
+    sconf= hco_get_server_conf(r->server);
 
     if(!sconf->enabled || strstr(r->uri, sconf->base_path) == NULL) {
         return OK;
     }
 
-    if(rconf->app_id == NULL) {
+    rconf= ap_get_module_config(r->request_config, &hco_module);
+    if(rconf == NULL) {
+        app_id = apr_table_get(
+            parse_query_string(r->pool, r->parsed_uri.query),
+            "app_id");
+    } else {
+        app_id = rconf->app_id;
+    }
+
+    if(app_id == NULL) {
         ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> skip report, missing app_id arg.");
         return OK;
     }
@@ -302,35 +362,17 @@ hco_log_transaction(request_rec *r)
         NULL
     );
 
-    curl_easy_setopt(sconf->curl, CURLOPT_URL, report_path);
-    curl_easy_setopt(sconf->curl, CURLOPT_POSTFIELDS, post_data);
-
-#if 1
-// XXX. replace with debug.
-    curl_easy_setopt(sconf->curl, CURLOPT_WRITEFUNCTION, hco_remote_write_data);
-    struct RemoteMemoryStruct chunk;
-    chunk.memory= malloc(1);
-    chunk.size  = 0;
-    curl_easy_setopt(sconf->curl, CURLOPT_WRITEDATA, (void *)&chunk);
-#endif
+    curl_easy_getinfo(sconf->curl, CURLINFO_RESPONSE_CODE, &remote_code);
 
     res= curl_easy_perform(sconf->curl);
 
     if(CURLE_OK == res) {
-#if 1
-// XXX. replace with debug.
-      if(chunk.memory) {
-        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> transaction response: < %s >.", chunk.memory );
-        free(chunk.memory);
-      }
-#endif
+        ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> upstream response: < %d >.", remote_code );
     } else {
-      ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "HCO: log-> failed: < %s >.", curl_easy_strerror(res));
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "HCO: log-> failed: < %s >.", curl_easy_strerror(res));
     }
     return OK;
 }
-
-
 
 /* _______________________________________
 **
@@ -494,7 +536,7 @@ static void hco_child_init(apr_pool_t *p, server_rec *main_server)
                     NULL
                 );
             curl_easy_setopt(sconf->curl, CURLOPT_USERAGENT, user_agent);
-            curl_easy_setopt(sconf->curl, CURLOPT_HEADER, 1);
+            // curl_easy_setopt(sconf->curl, CURLOPT_HEADER, 1);
             ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "HCO[%s]: user agent-> %s.", s->server_hostname, user_agent);
         } else {
             ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, "HCO[%s]: failed to create cURL handler.", s->server_hostname);
@@ -526,6 +568,8 @@ static void hco_register_hooks(apr_pool_t *p)
 
     ap_hook_fixups(hco_fixups, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_handler(hco_handler, NULL, NULL, APR_HOOK_MIDDLE);
+    hco_deny_filter_handle = ap_register_output_filter("HCO_DENY", hco_deny_filter, NULL, AP_FTYPE_RESOURCE);
+
     ap_hook_log_transaction(hco_log_transaction, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
