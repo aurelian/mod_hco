@@ -65,12 +65,6 @@ typedef struct {
     const char *auth_key;
     enum strategy auth_strategy;
     int enabled;
-    // persistency
-    apr_pool_t *pool;
-#if APR_HAS_THREADS
-    apr_thread_mutex_t *mutex;
-#endif
-    apr_hash_t *transactions;
 } hco_server_conf;
 
 // structure passed with request_rec
@@ -510,7 +504,7 @@ static void hco_child_init(apr_pool_t *p, server_rec *main_server)
             curl_easy_setopt(sconf->curl, CURLOPT_URL, sconf->end_point);
             // setup our user agent
             char *user_agent = apr_pstrcat(s->process->pool,
-                    "hco-agent/0.2 (+httpd: <",
+                    "hco-agent/0.3 (+httpd: <",
                     ap_get_server_description(),
                     "> +apr: <",
                     APR_VERSION_STRING,
