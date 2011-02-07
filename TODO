@@ -1,5 +1,5 @@
-0.1 
- * make it work on POST
+0.2
+ * make it work on POST (see page 141 in The Apache Modules Book)
  * make it work under Location directive and remove HcoBasePath
 
 1.0
